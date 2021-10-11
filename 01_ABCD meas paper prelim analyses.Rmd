@@ -1,0 +1,1304 @@
+---
+title: "ABCD measurement paper preliminary analyses & descriptives"
+author: "Meriah DeJoseph"
+date: "2020 - 2021"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+```{r}
+# Set working directory
+setwd("~/Box/!ICD/ABCD/ANALYSES/!REVISION") 
+
+```
+
+# About
+This script merges behavioral and RS data and generates two main output files:  
+- `df`: Dataframe with brain & bx data. Includes scans with >= 375 volumes & rows with missing RS values for a specific network (due to implausible RS values).  
+- `df2`: Version of `df` that only includes participants with complete cases.  
+
+Additionally, this file summarizes participant characteristics & covariates for the complete sample (`df2`).
+
+```{r}
+out_file_name = 'clean_df.csv'
+```
+
+
+# Setup
+## Libraries
+```{r libraries, warning=FALSE, echo=TRUE, include=TRUE, message=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(knitr)
+library(tidyverse)
+library(e1071)
+
+library(readr)
+library(Hmisc)
+library(corrplot)
+library(sjstats)
+library(ppcor)
+
+
+# Multi-level modeling 
+#library(lme4)
+#library(lmerTest)
+#library(bbmle)
+
+# Imputation 
+#library(mice)
+#library(miceadds)
+#library(AICcmodavg)
+
+# Libraries not used 
+#library(caret)
+#library(ridge)
+#library(glmnet)
+#library(ggpubr)
+#library(finalfit)
+#library(jtools)
+#library(ggstance)
+#library(stats)
+#library(psych)
+# library(glmmTMB)
+#library(cowplot)
+#library(fBasics)
+#library(dagitty)
+
+#library(xtable)
+#library(lqmm)
+#library(broom)
+#library(insight)
+
+# library(ggplot2)
+# library(dplyr)
+# library(tidyr)
+
+compareNA <- function(v1,v2) {
+  same <- (v1 == v2) | (is.na(v1) & is.na(v2))
+  same[is.na(same)] <- FALSE
+  return(same)
+}
+```
+
+## Load data  
+```{r load_data, warning=FALSE, include=TRUE, cache=TRUE, message=FALSE}
+# MNLFA factor scores 
+abcd <- read_csv("Data/ABCD_ALL PREDICTORS_9.7.21.csv")
+
+#RS data 
+rs <- read.csv("Data/brainBehavDF.csv")
+#drop mean motion in this bc I have it below and it's getting duplicated
+rs <- rs %>% select(-c(rsfmri_c_ngd_meanmotion))
+#add gordon covariates 
+brain_cov <- read.csv("Data/ABCD_rscovars.csv")
+brain = inner_join(rs, brain_cov, by = "SUBID") 
+
+#Merge the brain outcome data with the predictors 
+df = inner_join(abcd, brain, by = "SUBID") #N=9563 - cases with both Brain and BX
+```
+
+## Create variables
+```{r}
+#Average the left and right to create new vars for models
+df$conAmy_2h <- ((df$conAmy_lh + df$conAmy_rh)/2)
+df$conHipp_2h <- ((df$conHipp_lh + df$conHipp_rh)/2)
+df$conAcc_2h <- ((df$conAcc_lh + df$conAcc_rh)/2)
+
+#Get median splits for moderators to plot 
+df <- df %>% 
+  mutate(
+    DepETAmed = ifelse(DepETA>median(DepETA,na.rm=T), 1, 0),
+    ThreatETAmed = ifelse(ThreatETA>median(ThreatETA,na.rm=T), 1, 0),
+    SocETAmed = ifelse(SocETA>median(SocETA,na.rm=T), 1, 0),
+    # Convert to factors 
+    DepETAmed = as.factor(DepETAmed),
+    ThreatETAmed = as.factor(ThreatETAmed),
+    SocETAmed = as.factor(SocETAmed)
+  )
+
+#Make dummies for plots
+df$INRBELOW1<-na.pass(ifelse(df$INR <= 1, 1, 0))
+df$INRBELOW1 <- as.factor(df$INRBELOW1)
+df$HSorLESS <- na.pass(ifelse(df$HIGHED <= 12, 1, 0))
+df$HSorLESS <- as.factor(df$HSorLESS)
+```
+
+# Clean Data
+
+## Remove scans with too few volumes
+```{r remove_bad_scans}
+# Filter scans with too few volumes (Hagler et al 2019)
+df <- df %>%
+  mutate(usable = ifelse(rsfmri_c_ngd_ntpoints>=375,1,0))
+table(df$usable)
+
+df <- df %>% filter(usable==1) #7970
+```
+
+## Remove implausible rsFC values 
+```{r removeConWith}
+#Remove rsFC with absolute values > than 0.9
+flag_implausible <- function(x) {
+  y = ifelse(abs(x)>0.9, 1,0)
+  return(y)
+}
+
+df <- df %>%
+  mutate(outconwith = flag_implausible(conWith),
+         outdmnWith = flag_implausible(dmnWith),
+         outdanWith = flag_implausible(danWith),
+         outvanWith = flag_implausible(vanWith),
+         outfparWith = flag_implausible(fparWith),
+         outSalWith = flag_implausible(salWith),
+         outdmnSal = flag_implausible(dmnSal),
+         outdanVan = flag_implausible(danVan),
+         outconAmy_2h = flag_implausible(conAmy_2h),
+         outconHipp_2h = flag_implausible(conHipp_2h),
+         outconAcc_2h = flag_implausible(conAcc_2h))
+
+```
+
+```{r}
+table(df$outconwith) 
+table(df$outdmnWith) 
+table(df$outdanWith) 
+table(df$outvanWith) 
+table(df$outfparWith) 
+table(df$outSalWith) 
+table(df$outdmnSal) 
+table(df$outdanVan) 
+table(df$outconAmy_2h) 
+table(df$outconHipp_2h) 
+table(df$outconAcc_2h) 
+```
+
+```{r}
+# Set cases with implausible values to NA
+df = df %>%
+  mutate(conWith = ifelse(compareNA(outconwith, 1)==1, NA, conWith), 
+         dmnWith = ifelse(compareNA(outdmnWith, 1)==1, NA, dmnWith),
+         danWith = ifelse(compareNA(outdanWith, 1)==1, NA, danWith),
+         vanWith = ifelse(compareNA(outvanWith, 1)==1, NA, vanWith),
+         fparWith = ifelse(compareNA(outfparWith, 1)==1, NA, fparWith),
+         salWith = ifelse(compareNA(outSalWith, 1)==1, NA, salWith),
+         dmnSal = ifelse(compareNA(outdmnSal, 1)==1, NA, dmnSal),
+         danVan = ifelse(compareNA(outdanVan, 1)==1, NA, danVan), 
+         conAmy_2h = ifelse(compareNA(outconAmy_2h, 1)==1, NA, conAmy_2h),
+         conHipp_2h = ifelse(compareNA(outconHipp_2h, 1)==1, NA, conHipp_2h),
+         conAcc_2h = ifelse(compareNA(outconAcc_2h, 1)==1, NA, conAcc_2h))
+```
+
+```{r}
+summary(df$conWith)
+summary(df$dmnWith)
+summary(df$danWith)
+summary(df$vanWith)
+summary(df$salWith)
+summary(df$dmnSal)
+summary(df$danVan)
+summary(df$conAmy_2h)
+summary(df$conHipp_2h)
+summary(df$conAcc_2h)
+```
+
+# Participant characteristics
+List of participants with complete data
+```{r}
+df2 = subset(df, 
+      !is.na(df$conWith) & 
+      !is.na(df$dmnWith) &
+      !is.na(df$danWith) &
+      !is.na(df$vanWith) &
+      !is.na(df$fparWith) &
+      !is.na(df$salWith) &
+      !is.na(df$salDmn) &
+      !is.na(df$danVan) &
+      !is.na(df$conAmy_2h) &
+      !is.na(df$conHipp_2h) &
+      !is.na(df$conAcc_2h))
+```
+
+Number of datapoints after keeping complete cases
+```{r}
+nrow(df2) #7834
+```
+
+## Save clean data
+```{r}
+write.csv(df2, paste(getwd(), out_file_name, sep='/'))
+```
+
+```{r}
+# Site 
+table(df2$sitenum) #reminder: 2 sites gone bc of Phillips
+round(prop.table(table(df2$sitenum)), 3)
+
+table(df2$RACE4L)
+round(prop.table(table(df2$RACE4L)),3)
+
+table(df2$FEMALE) #1=female
+round(prop.table(table(df2$FEMALE)),3)
+
+summary(df2$agemo)
+sd(df2$agemo)
+
+summary(df2$INR)
+sd(df2$INR, na.rm=T)
+
+summary(df2$HIGHED)
+sd(df2$HIGHED, na.rm=T)
+```
+
+```{r}
+#Compare against full sample -- very similar to analytic sample
+
+table(abcd$sitenum) #reminder: 2 sites gone bc of Phillips
+round(prop.table(table(abcd$sitenum)), 3)
+
+table(abcd$RACE4L)
+round(prop.table(table(abcd$RACE4L)),3)
+
+table(abcd$FEMALE) #1=female
+round(prop.table(table(abcd$FEMALE)), 3)
+
+summary(abcd$agemo)
+sd(abcd$agemo)
+
+summary(abcd$INR)
+sd(abcd$INR, na.rm=T)
+
+summary(abcd$HIGHED)
+sd(abcd$HIGHED, na.rm=T)
+```
+
+
+# Distributions of the predictors
+```{r age_distribution, warning=FALSE, message=FALSE, echo=FALSE, include=TRUE, cache=TRUE}
+ggplot(data = df2, aes(x = agemo)) + 
+  geom_histogram(color = 'black')  +
+  labs(x='Age in months')
+```
+
+```{r highed_distribution, message=FALSE,warning=FALSE, echo=FALSE, include=TRUE, cache=TRUE}
+ggplot(data = df2, aes(x = HIGHED)) + 
+  geom_histogram(color = 'black', bins =15) +
+  labs(x='Highest education')
+```
+
+```{r INR_dist,message=FALSE, warning=FALSE, echo=FALSE, include=TRUE, cache=TRUE}
+INRD <- df2 %>% 
+  summarise(Mean = mean(INR, na.rm=TRUE),
+            SD = sd(INR, na.rm=TRUE),
+            Skew= skewness(INR, na.rm=TRUE),
+            Kurtosis = kurtosis(INR, na.rm=TRUE))
+INRD
+
+ggplot(data=df2, aes(x= INR)) +
+  geom_histogram(color = 'black')
+```
+
+```{r DEPETA_dist, message=FALSE,warning=FALSE, echo=FALSE, include=TRUE, cache=TRUE}
+#Material/econonomic deprivation
+DepETAD <- df2 %>% 
+  summarise(Mean = mean(DepETA, na.rm=TRUE),
+            SD = sd(DepETA, na.rm=TRUE),
+            Skew= skewness(DepETA, na.rm=TRUE),
+            Kurtosis = kurtosis(DepETA, na.rm=TRUE)
+            )
+DepETAD
+
+ggplot(data=df2, aes(x= DepETA)) +
+  geom_histogram(color = 'black')
+```
+
+```{r THREATETA_dist, message=FALSE,warning=FALSE, echo=FALSE, include=TRUE, cache=TRUE}
+#Threat
+ThreatETAD <- df2 %>% 
+  summarise(Mean = mean(ThreatETA, na.rm=TRUE),
+            SD = sd(ThreatETA, na.rm=TRUE),
+            Skew= skewness(ThreatETA, na.rm=TRUE),
+            Kurtosis = kurtosis(ThreatETA, na.rm=TRUE)
+            )
+ThreatETAD
+
+ggplot(data=df2, aes(x= ThreatETA)) +
+  geom_histogram(color = 'black', bins = 50)
+
+
+```
+
+
+```{r SOCETA_dist,message=FALSE, warning=FALSE, echo=FALSE, include=TRUE, cache=TRUE}
+#Social support
+SocETAD <- df2 %>% 
+  summarise(Mean = mean(SocETA, na.rm=TRUE),
+            SD = sd(SocETA, na.rm=TRUE),
+            Skew= skewness(SocETA, na.rm=TRUE),
+            Kurtosis = kurtosis(SocETA, na.rm=TRUE)
+            )
+SocETAD
+
+ggplot(data=df2, aes(x= SocETA)) +
+  geom_histogram(color = 'black', bins = 50)
+```
+
+
+# Distributions of the outcomes
+
+## Within-network
+```{r conWith_dist, echo=FALSE, include=TRUE, cache=TRUE}
+#Cingulo-opercular = con
+conWithD <- df2 %>% 
+  summarise(Mean = mean(conWith, na.rm=TRUE),
+            SD = sd(conWith, na.rm=TRUE),
+            Skew= skewness(conWith, na.rm=TRUE),
+            Kurtosis = kurtosis(conWith, na.rm=TRUE),
+            max = max(conWith, na.rm=TRUE)
+            )
+conWithD
+
+ggplot(data=df2, aes(x= conWith)) +
+  geom_histogram(color = 'black', bins = 50)
+```
+
+```{r dmnWith_dist, echo=FALSE, include=TRUE, cache=TRUE}
+#Default mode = dmn
+dmnWithD <- df2 %>% 
+  summarise(Mean = mean(dmnWith, na.rm=TRUE),
+            SD = sd(dmnWith, na.rm=TRUE),
+            Skew= skewness(dmnWith, na.rm=TRUE),
+            Kurtosis = kurtosis(dmnWith, na.rm=TRUE)
+            )
+dmnWithD
+
+ggplot(data=df2, aes(x= dmnWith)) +
+  geom_histogram(color = 'black')
+```
+
+```{r danWith_dist, echo=FALSE, include=TRUE, cache=TRUE}
+#Dorsal attention = dan
+danWithD <- df2 %>% 
+  summarise(Mean = mean(danWith, na.rm=TRUE),
+            SD = sd(danWith, na.rm=TRUE),
+            Skew= skewness(danWith, na.rm=TRUE),
+            Kurtosis = kurtosis(danWith, na.rm=TRUE)
+            )
+danWithD
+
+ggplot(data=df2, aes(x= danWith)) +
+  geom_histogram(color = 'black')
+
+```
+
+```{r fparWith_dist, echo=FALSE, include=TRUE, cache=TRUE}
+#Fronto-parietal = fpar
+fparWithD <- df2 %>% 
+  summarise(Mean = mean(fparWith, na.rm=TRUE),
+            SD = sd(fparWith, na.rm=TRUE),
+            Skew= skewness(fparWith, na.rm=TRUE),
+            Kurtosis = kurtosis(fparWith, na.rm=TRUE)
+            )
+fparWithD
+
+ggplot(data=df2, aes(x= fparWith)) +
+  geom_histogram(color = 'black')
+```
+
+```{r salWithDist, echo=FALSE, include=TRUE, cache=TRUE}
+#Salience = sal
+salWithD <- df2 %>% 
+  summarise(Mean = mean(salWith, na.rm=TRUE),
+            SD = sd(salWith, na.rm=TRUE),
+            Skew= skewness(salWith, na.rm=TRUE),
+            Kurtosis = kurtosis(salWith, na.rm=TRUE)
+            )
+salWithD
+
+ggplot(data=df2, aes(x= salWith)) +
+  geom_histogram(color = 'black')
+
+```
+
+```{r vanWithDist, echo=FALSE, include=TRUE, cache=TRUE}
+#Ventral attention = van
+vanWithD <- df2 %>% 
+  summarise(Mean = mean(vanWith, na.rm=TRUE),
+            SD = sd(vanWith, na.rm=TRUE),
+            Skew= skewness(vanWith, na.rm=TRUE),
+            Kurtosis = kurtosis(vanWith, na.rm=TRUE)
+            )
+vanWithD
+
+ggplot(data=df2, aes(x= vanWith)) +
+  geom_histogram(color = 'black')
+```
+
+## Between-network
+```{r salDMN_dist, echo=FALSE, include=TRUE, cache=TRUE}
+#Salience and DMN: salDmn
+salDmnD <- df2 %>% 
+  summarise(Mean = mean(salDmn, na.rm=TRUE),
+            SD = sd(salDmn, na.rm=TRUE),
+            Skew= skewness(salDmn, na.rm=TRUE),
+            Kurtosis = kurtosis(salDmn, na.rm=TRUE)
+            )
+salDmnD
+
+ggplot(data=df2, aes(x= salDmn)) +
+  geom_histogram(color = 'black')
+```
+
+```{r danvan_dist, warning=FALSE, echo=FALSE, include=TRUE, cache=TRUE}
+#Dorsal attn and ventral attn: danVan
+danVanD <- df2 %>% 
+  summarise(Mean = mean(danVan, na.rm=TRUE),
+            SD = sd(danVan, na.rm=TRUE),
+            Skew= skewness(danVan, na.rm=TRUE),
+            Kurtosis = kurtosis(danVan, na.rm=TRUE)
+            )
+danVanD
+
+ggplot(data=df2, aes(x= danVan)) +
+  geom_histogram(color = 'black')
+```
+
+## Network-ROI
+```{r conAmy, warning=FALSE, echo=FALSE, include=TRUE, cache=TRUE}
+#cingulo-opercular network connectivity with the amygdala: conAmy_2h
+conAmy_2hD <- df2 %>% 
+  summarise(Mean = mean(conAmy_2h, na.rm=TRUE),
+            SD = sd(conAmy_2h, na.rm=TRUE),
+            Skew= skewness(conAmy_2h, na.rm=TRUE),
+            Kurtosis = kurtosis(conAmy_2h, na.rm=TRUE)
+            )
+conAmy_2hD
+
+ggplot(data=df2, aes(x= conAmy_2h)) +
+  geom_histogram(color = 'black')
+```
+
+```{r conHipp_dist, warning=FALSE, echo=FALSE, include=TRUE, cache=TRUE}
+conHipp_2hD <- df2 %>% 
+  summarise(Mean = mean(conHipp_2h, na.rm=TRUE),
+            SD = sd(conHipp_2h, na.rm=TRUE),
+            Skew= skewness(conHipp_2h, na.rm=TRUE),
+            Kurtosis = kurtosis(conHipp_2h, na.rm=TRUE)
+            )
+conHipp_2hD
+
+ggplot(data=df2, aes(x= conHipp_2h)) +
+  geom_histogram(color = 'black')
+```
+
+```{r conACC_dist, warning=FALSE, echo=FALSE, include=TRUE, cache=TRUE}
+#cingulo-opercular network connectivity with the nucleus accumbens: conAcc_2h
+conAcc_2hD <- df2 %>% 
+  summarise(Mean = mean(conAcc_2h, na.rm=TRUE),
+            SD = sd(conAcc_2h, na.rm=TRUE),
+            Skew= skewness(conAcc_2h, na.rm=TRUE),
+            Kurtosis = kurtosis(conAcc_2h, na.rm=TRUE)
+            )
+conAcc_2hD
+
+ggplot(data=df2, aes(x= conAcc_2h)) +
+  geom_histogram(color = 'black')
+
+```
+
+```{r}
+knit_exit()
+```
+
+
+### Density plots as a function of income and education
+```{r, warning=FALSE, echo=FALSE, include=TRUE, cache=TRUE}
+#########################################
+##Density plots highlighting overlap
+#########################################
+
+# Look at some descriptives
+table(df2$INRBELOW1)
+#   0    1 
+#6154  954 
+table(df2$HSorLESS)
+#   0    1 
+#7724  104 
+
+# Change outline and fill colors by groups INR at or below 1 = 1
+# Use a custom palette
+library(ggpubr)
+
+Depdens <-ggdensity(df2, x = "DepETA", 
+          add = "mean", rug = TRUE,
+          color = "INRBELOW1", fill = "INRBELOW1", 
+          xlab="Material & economic deprivation", 
+          palette = c("#0073C2FF", "#FC4E07"))
+
+#Depdens <- Depdens + theme(legend.position = "none")
+ggsave("Depdens.png", width = 4, height = 4)
+
+Socdens <- ggdensity(df2, x = "SocETA",
+          add = "mean", rug = TRUE,
+          color = "INRBELOW1", fill = "INRBELOW1", 
+          xlab="Caregiver social support", 
+          palette = c("#0073C2FF", "#FC4E07"))
+
+#Socdens <- Socdens + theme(legend.position = "none")
+ggsave("Socdens.png", width = 4, height = 4)
+
+Threatdens <- ggdensity(df2, x = "ThreatETA",
+          add = "mean", rug = TRUE,
+          color = "INRBELOW1", fill = "INRBELOW1", 
+          xlab="Psychosocial threat", 
+          palette = c("#0073C2FF", "#FC4E07"))
+
+#Threatdens <- Threatdens + theme(legend.position = "none")
+ggsave("Threatdens.png", width = 4, height = 4)
+
+#Explore whether big diff w/income and education
+Edudens <- ggdensity(df2, x = "HIGHED",
+          add = "mean", rug = TRUE,
+          color = "INRBELOW1", fill = "INRBELOW1", 
+          xlab="Years of education", 
+          palette = c("#0073C2FF", "#FC4E07"))
+
+#Threatdens <- Threatdens + theme(legend.position = "none")
+ggsave("Edudens.png", width = 4, height = 4)
+
+
+###Education
+
+DepdensED <-ggdensity(df2, x = "DepETA", 
+          add = "mean", rug = TRUE,
+          color = "HSorLESS", fill = "HSorLESS", 
+          xlab="Material & economic deprivation", 
+          palette = c("#0073C2FF", "#FC4E07"))
+
+#Depdens <- Depdens + theme(legend.position = "none")
+ggsave("DepdensED.png", width = 4, height = 4)
+
+SocdensED <- ggdensity(df2, x = "SocETA",
+          add = "mean", rug = TRUE,
+          color = "HSorLESS", fill = "HSorLESS", 
+          xlab="Caregiver social support", 
+          palette = c("#0073C2FF", "#FC4E07"))
+
+#Socdens <- Socdens + theme(legend.position = "none")
+ggsave("SocdensED.png", width = 4, height = 4)
+
+ThreatdensED <- ggdensity(df2, x = "ThreatETA",
+          add = "mean", rug = TRUE,
+          color = "HSorLESS", fill = "HSorLESS", 
+          xlab="Psychosocial threat", 
+          palette = c("#0073C2FF", "#FC4E07"))
+
+#Threatdens <- Threatdens + theme(legend.position = "none")
+ggsave("ThreatdensED.png", width = 4, height = 4)
+
+
+df2$BLACK = as.factor(df2$BLACK)
+df2$HISPANIC = as.factor(df2$HISPANIC)
+df2$OTHER = as.factor(df2$OTHER)
+df2$WHITE = as.factor(df2$WHITE)
+
+#Explore racial differences in income to examine possible structural influences
+INRdensBlack <- ggdensity(df2, x = "INR",
+          add = "mean", rug = TRUE,
+          color = "BLACK", fill = "BLACK", 
+          xlab="INR", 
+          palette = c("#0073C2FF", "#FC4E07"))
+
+INRdensHispanic <- ggdensity(df2, x = "INR",
+          add = "mean", rug = TRUE,
+          color = "HISPANIC", fill = "HISPANIC", 
+          xlab="INR", 
+          palette = c("#0073C2FF", "#FC4E07"))
+
+INRdensOther <- ggdensity(df2, x = "INR",
+          add = "mean", rug = TRUE,
+          color = "OTHER", fill = "OTHER", 
+          xlab="INR", 
+          palette = c("#0073C2FF", "#FC4E07"))
+
+INRdensWhite <- ggdensity(df2, x = "INR",
+          add = "mean", rug = TRUE,
+          color = "WHITE", fill = "WHITE", 
+          xlab="INR", 
+          palette = c("#0073C2FF", "#FC4E07"))
+
+
+```
+
+### Correlations & scatterplots to determine interactions and functional form
+```{r, warning=FALSE, echo=FALSE, include=TRUE, cache=TRUE}
+
+library(xtable)
+#Make matrix for correlations
+my_matrix <- df2[, c("INR", "HIGHED", "DepETA", "ThreatETA", "SocETA", 
+                    "conWith", "dmnWith", "danWith", "fparWith", "salWith", "vanWith",
+                    "salDmn", "danVan", "conAmy_2h", "conHipp_2h", "conAcc_2h")]
+my_cor <- cor(my_matrix,use="complete.obs")
+upper<-my_cor
+upper[upper.tri(my_cor)]<-""
+upper<-as.data.frame(upper)
+print(xtable(upper), type="html")
+
+#Another way of looking at correlations
+corrplot(my_cor, type="upper", order="hclust", tl.col="black", tl.srt=45)
+corrplot(my_cor, method = "color")
+col = colorRampPalette(c("#BB4444", "#EE9988", "#FFFFFF", "#77AADD", "#4477AA"))
+corrplot(my_cor, method="shade", shade.col=NA, tl.col="black",
+                          tl.srt=45, col=col(200), addCoef.col="black", 
+                          cl.pos="n", type = "lower", number.cex=0.65)
+
+#More correlations w/ plots
+corrplot2 <- pairs.panels(my_matrix[c("INR", "HIGHED", "DepETA", "ThreatETA", "SocETA", 
+                    "conWith", "dmnWith", "danWith", "fparWith", "salWith", "vanWith",
+                    "salDmn", "danVan", "conAmy_2h", "conHipp_2h", "conAcc_2h")])
+
+#Now do with subsample to see more clearly
+ids <- unique(df2$SUBID)   # This creates a vector of identification numbers in the data
+subdata <- subset(df2,
+                  SUBID %in% sample(ids,size=100))  
+
+#Examine transformations 
+#subdata$INR <- sqrt(subdata$INR)
+
+#Make matrix 2 for correlations on subdata
+my_matrixsub <- subdata[, c("INR", "HIGHED", "DepETA", "ThreatETA", "SocETA", 
+                    "conWith", "dmnWith", "danWith", "fparWith", "salWith", "vanWith",
+                    "salDmn", "danVan", "conAmy_2h", "conHipp_2h", "conAcc_2h")]
+
+my_corsub <- cor(my_matrixsub,use="complete.obs")
+
+corsubplot <- pairs.panels(my_matrixsub[c("INR", "HIGHED", "DepETA", "ThreatETA", "SocETA", 
+                    "conWith", "dmnWith", "danWith", "fparWith", "salWith", "vanWith",
+                    "salDmn", "danVan", "conAmy_2h", "conHipp_2h", "conAcc_2h")])
+
+############
+
+#As one might expect, INR, education, and DepETA are correlated at around .5.
+#That's not insane enough to say they are too colinear to keep in the model
+#together, but I think it warrants not doing interactions between them bc that
+#would be extrapolation for a low SES low Dep group that doesn't really exist
+#Let's look at some scatterplots by INR as example
+ggplot(df2, aes(x=DepETA, y=conWith, colour=as.factor(INRBELOW1)))+
+  geom_point(alpha=.09) +
+  stat_smooth(method=lm)
+#Yea all the ppl above 1 are clustered near the low end of dep
+
+
+#######################
+#Partial correlations to account for variance that's baked into MNLFA scores
+######################
+
+#dep and threat
+my_matrix <- df2[, c("DepETA","ThreatETA","agemo","FEMALE", "BLACK", "HISPANIC", "OTHER", "INR", "HIGHED")]
+my_matrix <-na.omit(my_matrix)
+pcor.test(my_matrix$DepETA, my_matrix$ThreatETA, my_matrix[,c("agemo","FEMALE", "BLACK", "HISPANIC", "OTHER", "INR", "HIGHED")])
+#0.03847519
+
+#dep and soc
+my_matrix <- df2[, c("DepETA","SocETA","agemo","FEMALE", "BLACK", "HISPANIC", "OTHER", "INR", "HIGHED")]
+my_matrix <-na.omit(my_matrix)
+pcor.test(my_matrix$DepETA, my_matrix$SocETA, my_matrix[,c("agemo","FEMALE", "BLACK", "HISPANIC", "OTHER", "INR", "HIGHED")])
+#-0.004896123
+
+#dep and INR
+my_matrix <- df2[, c("DepETA","agemo","FEMALE", "BLACK", "HISPANIC", "OTHER", "INR", "HIGHED")]
+my_matrix <-na.omit(my_matrix)
+pcor.test(my_matrix$DepETA, my_matrix$INR, my_matrix[,c("BLACK",  "OTHER", "HIGHED")])
+#-0.7134458 
+
+#dep and highed
+my_matrix <- df2[, c("DepETA","agemo","FEMALE", "BLACK", "HISPANIC", "OTHER", "INR", "HIGHED")]
+my_matrix <-na.omit(my_matrix)
+pcor.test(my_matrix$DepETA, my_matrix$HIGHED, my_matrix[,c("BLACK",  "OTHER", "INR")])
+#-0.1871886 
+
+###
+
+
+#threat and soc
+my_matrix <- df2[, c("ThreatETA","SocETA","agemo","FEMALE", "BLACK", "HISPANIC", "OTHER", "INR", "HIGHED")]
+my_matrix <-na.omit(my_matrix)
+pcor.test(my_matrix$ThreatETA, my_matrix$SocETA, my_matrix[,c("agemo","FEMALE", "OTHER", "INR")])
+#-0.2631113
+
+#threat and INR
+my_matrix <- df2[, c("ThreatETA","agemo","FEMALE", "BLACK", "HISPANIC", "OTHER", "INR", "HIGHED")]
+my_matrix <-na.omit(my_matrix)
+pcor.test(my_matrix$ThreatETA, my_matrix$INR, my_matrix[,c("agemo","FEMALE")])
+#-0.247057
+
+#threat and highed
+my_matrix <- df2[, c("ThreatETA","agemo","FEMALE", "BLACK", "HISPANIC", "OTHER", "INR", "HIGHED")]
+my_matrix <-na.omit(my_matrix)
+pcor.test(my_matrix$ThreatETA, my_matrix$HIGHED, my_matrix[,c("agemo","FEMALE")])
+#-0.1191264
+
+##
+
+#soc and INR
+my_matrix <- df2[, c("SocETA","agemo","FEMALE", "BLACK", "HISPANIC", "OTHER", "INR", "HIGHED")]
+my_matrix <-na.omit(my_matrix)
+pcor.test(my_matrix$SocETA, my_matrix$INR, my_matrix[,c("agemo","FEMALE", "OTHER")])
+#0.04002234
+
+#soc and highed
+my_matrix <- df2[, c("SocETA","agemo","FEMALE", "BLACK", "HISPANIC", "OTHER", "INR", "HIGHED")]
+my_matrix <-na.omit(my_matrix)
+pcor.test(my_matrix$SocETA, my_matrix$HIGHED, my_matrix[,c("agemo","FEMALE", "OTHER", "INR")])
+#-0.0009394053
+
+```
+
+### Scatterplots
+```{r, warning=FALSE, echo=FALSE, include=TRUE, cache=TRUE}
+
+#Let's look at some scatterplots to see what kinds of functional forms we should test in mixed models
+#"conWith", "dmnWith", "danWith", "fparWith", "salWith", "vanWith",
+#"salDmn", "danVan", "conAmy_2h", "conHipp_2h", "conAcc_2h"
+
+#Revision request: show cases of SES and DepETA
+ggplot(df2, aes(x=INR, y=DepETA))+
+  geom_point(alpha=.04) 
+
+ggplot(df2, aes(x=DepETA, y=INR))+
+  geom_jitter(alpha=.04) 
+
+ggplot(df2, aes(x=DepETA, y=HIGHED))+
+  geom_jitter(alpha=.04) 
+
+
+
+###conWith###
+
+#INR 
+ggplot(df2, aes(x=INR, y=conWith))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#EDU 
+ggplot(df2, aes(x=HIGHED, y=conWith))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#DepETA 
+ggplot(df2, aes(x=DepETA, y=conWith))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#ThreatETA 
+ggplot(df2, aes(x=ThreatETA, y=conWith))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#SocETA
+ggplot(df2, aes(x=SocETA, y=conWith))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+
+
+
+###dmnWith###
+
+#INR 
+ggplot(df2, aes(x=INR, y=dmnWith))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#EDU 
+ggplot(df2, aes(x=HIGHED, y=dmnWith))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#DepETA 
+ggplot(df2, aes(x=DepETA, y=dmnWith))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#ThreatETA 
+ggplot(df2, aes(x=ThreatETA, y=dmnWith))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#SocETA
+ggplot(df2, aes(x=SocETA, y=dmnWith))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+
+###danWith###
+
+#INR 
+ggplot(df2, aes(x=INR, y=danWith))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#EDU 
+ggplot(df2, aes(x=HIGHED, y=danWith))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#DepETA 
+ggplot(df2, aes(x=DepETA, y=danWith))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#ThreatETA 
+ggplot(df2, aes(x=ThreatETA, y=danWith))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#SocETA
+ggplot(df2, aes(x=SocETA, y=danWith))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+
+
+###fparWith###
+
+#INR 
+ggplot(df2, aes(x=INR, y=fparWith))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#EDU 
+ggplot(df2, aes(x=HIGHED, y=fparWith))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#DepETA 
+ggplot(df2, aes(x=DepETA, y=fparWith))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#ThreatETA 
+ggplot(df2, aes(x=ThreatETA, y=fparWith))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#SocETA
+ggplot(df2, aes(x=SocETA, y=fparWith))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+
+###salWith###
+
+#INR 
+ggplot(df2, aes(x=INR, y=salWith))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#EDU 
+ggplot(df2, aes(x=HIGHED, y=salWith))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#DepETA 
+ggplot(df2, aes(x=DepETA, y=salWith))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#ThreatETA 
+ggplot(df2, aes(x=ThreatETA, y=salWith))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#SocETA
+ggplot(df2, aes(x=SocETA, y=salWith))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+
+
+###vanWith###
+
+#INR 
+ggplot(df2, aes(x=INR, y=vanWith))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#EDU 
+ggplot(df2, aes(x=HIGHED, y=vanWith))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#DepETA 
+ggplot(df2, aes(x=DepETA, y=vanWith))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#ThreatETA 
+ggplot(df2, aes(x=ThreatETA, y=vanWith))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#SocETA
+ggplot(df2, aes(x=SocETA, y=vanWith))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+
+
+###salDmn###
+
+#INR 
+ggplot(df2, aes(x=INR, y=salDmn))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#EDU 
+ggplot(df2, aes(x=HIGHED, y=salDmn))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#DepETA 
+ggplot(df2, aes(x=DepETA, y=salDmn))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#ThreatETA 
+ggplot(df2, aes(x=ThreatETA, y=salDmn))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#SocETA
+ggplot(df2, aes(x=SocETA, y=salDmn))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+
+###danVan###
+
+#INR 
+ggplot(df2, aes(x=INR, y=danVan))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#EDU 
+ggplot(df2, aes(x=HIGHED, y=danVan))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#DepETA 
+ggplot(df2, aes(x=DepETA, y=danVan))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#ThreatETA 
+ggplot(df2, aes(x=ThreatETA, y=danVan))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#SocETA
+ggplot(df2, aes(x=SocETA, y=danVan))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+
+
+###conAmy_2h###
+
+#INR 
+ggplot(df2, aes(x=INR, y=conAmy_2h))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#EDU 
+ggplot(df2, aes(x=HIGHED, y=conAmy_2h))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#DepETA 
+ggplot(df2, aes(x=DepETA, y=conAmy_2h))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#ThreatETA 
+ggplot(df2, aes(x=ThreatETA, y=conAmy_2h))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#SocETA
+ggplot(df2, aes(x=SocETA, y=conAmy_2h))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+
+
+###conHipp_2h###
+
+#INR 
+ggplot(df2, aes(x=INR, y=conHipp_2h))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#EDU 
+ggplot(df2, aes(x=HIGHED, y=conHipp_2h))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#DepETA 
+ggplot(df2, aes(x=DepETA, y=conHipp_2h))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#ThreatETA 
+ggplot(df2, aes(x=ThreatETA, y=conHipp_2h))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#SocETA
+ggplot(df2, aes(x=SocETA, y=conHipp_2h))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+
+###conAcc_2h###
+
+#INR 
+ggplot(df2, aes(x=INR, y=conAcc_2h))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#EDU 
+ggplot(df2, aes(x=HIGHED, y=conAcc_2h))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#DepETA 
+ggplot(df2, aes(x=DepETA, y=conAcc_2h))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#ThreatETA 
+ggplot(df2, aes(x=ThreatETA, y=conAcc_2h))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#SocETA
+ggplot(df2, aes(x=SocETA, y=conAcc_2h))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+
+```
+
+### Scatterplots on subsample to double check I can see these functional forms clearly
+```{r, warning=FALSE, echo=FALSE, include=TRUE, cache=TRUE}
+ids <- unique(df2$SUBID)   # This creates a vector of identification numbers in the data
+subdata <- subset(df2,
+                  SUBID %in% sample(ids,size=500))  
+
+###conWith###
+
+#INR 
+ggplot(subdata, aes(x=INR, y=conWith))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#EDU 
+ggplot(subdata, aes(x=HIGHED, y=conWith))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#DepETA 
+ggplot(subdata, aes(x=DepETA, y=conWith))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#ThreatETA 
+ggplot(subdata, aes(x=ThreatETA, y=conWith))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#SocETA
+ggplot(subdata, aes(x=SocETA, y=conWith))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+
+
+
+###dmnWith###
+
+#INR 
+ggplot(subdata, aes(x=INR, y=dmnWith))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#EDU 
+ggplot(subdata, aes(x=HIGHED, y=dmnWith))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#DepETA 
+ggplot(subdata, aes(x=DepETA, y=dmnWith))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#ThreatETA 
+ggplot(subdata, aes(x=ThreatETA, y=dmnWith))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#SocETA
+ggplot(subdata, aes(x=SocETA, y=dmnWith))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+
+###danWith###
+
+#INR 
+ggplot(subdata, aes(x=INR, y=danWith))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#EDU 
+ggplot(subdata, aes(x=HIGHED, y=danWith))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#DepETA 
+ggplot(subdata, aes(x=DepETA, y=danWith))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#ThreatETA 
+ggplot(subdata, aes(x=ThreatETA, y=danWith))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#SocETA
+ggplot(subdata, aes(x=SocETA, y=danWith))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+
+
+###fparWith###
+
+#INR 
+ggplot(subdata, aes(x=INR, y=fparWith))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#EDU 
+ggplot(subdata, aes(x=HIGHED, y=fparWith))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#DepETA 
+ggplot(subdata, aes(x=DepETA, y=fparWith))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#ThreatETA 
+ggplot(subdata, aes(x=ThreatETA, y=fparWith))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#SocETA
+ggplot(subdata, aes(x=SocETA, y=fparWith))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+
+###salWith###
+
+#INR 
+ggplot(subdata, aes(x=INR, y=salWith))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#EDU 
+ggplot(subdata, aes(x=HIGHED, y=salWith))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#DepETA 
+ggplot(subdata, aes(x=DepETA, y=salWith))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#ThreatETA 
+ggplot(subdata, aes(x=ThreatETA, y=salWith))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#SocETA
+ggplot(subdata, aes(x=SocETA, y=salWith))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+
+
+###vanWith###
+
+#INR 
+ggplot(subdata, aes(x=INR, y=vanWith))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#EDU 
+ggplot(subdata, aes(x=HIGHED, y=vanWith))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#DepETA 
+ggplot(subdata, aes(x=DepETA, y=vanWith))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#ThreatETA 
+ggplot(subdata, aes(x=ThreatETA, y=vanWith))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#SocETA
+ggplot(subdata, aes(x=SocETA, y=vanWith))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+
+
+###salDmn###
+
+#INR 
+ggplot(subdata, aes(x=INR, y=salDmn))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#EDU 
+ggplot(subdata, aes(x=HIGHED, y=salDmn))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#DepETA 
+ggplot(subdata, aes(x=DepETA, y=salDmn))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#ThreatETA 
+ggplot(subdata, aes(x=ThreatETA, y=salDmn))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#SocETA
+ggplot(subdata, aes(x=SocETA, y=salDmn))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+
+###danVan###
+
+#INR 
+ggplot(subdata, aes(x=INR, y=danVan))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#EDU 
+ggplot(subdata, aes(x=HIGHED, y=danVan))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#DepETA 
+ggplot(subdata, aes(x=DepETA, y=danVan))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#ThreatETA 
+ggplot(subdata, aes(x=ThreatETA, y=danVan))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#SocETA
+ggplot(subdata, aes(x=SocETA, y=danVan))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+
+
+###conAmy_2h###
+
+#INR 
+ggplot(subdata, aes(x=INR, y=conAmy_2h))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#EDU 
+ggplot(subdata, aes(x=HIGHED, y=conAmy_2h))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#DepETA 
+ggplot(subdata, aes(x=DepETA, y=conAmy_2h))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#ThreatETA 
+ggplot(subdata, aes(x=ThreatETA, y=conAmy_2h))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#SocETA
+ggplot(subdata, aes(x=SocETA, y=conAmy_2h))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+
+
+###conHipp_2h###
+
+#INR 
+ggplot(subdata, aes(x=INR, y=conHipp_2h))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#EDU 
+ggplot(subdata, aes(x=HIGHED, y=conHipp_2h))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#DepETA 
+ggplot(subdata, aes(x=DepETA, y=conHipp_2h))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#ThreatETA 
+ggplot(subdata, aes(x=ThreatETA, y=conHipp_2h))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#SocETA
+ggplot(subdata, aes(x=SocETA, y=conHipp_2h))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+
+###conAcc_2h###
+
+#INR 
+ggplot(subdata, aes(x=INR, y=conAcc_2h))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#EDU 
+ggplot(subdata, aes(x=HIGHED, y=conAcc_2h))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#DepETA 
+ggplot(subdata, aes(x=DepETA, y=conAcc_2h))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#ThreatETA 
+ggplot(subdata, aes(x=ThreatETA, y=conAcc_2h))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+#SocETA
+ggplot(subdata, aes(x=SocETA, y=conAcc_2h))+
+  geom_point(alpha=.04) +
+  stat_smooth()
+```

@@ -1,0 +1,53 @@
+---
+title: "ABCD mixed model tables"
+author: "Meriah DeJoseph and Robin Sifre"
+date: "3.22.2021"
+output: html_document
+---
+
+```{r}
+library(sjPlot)
+library(expss)
+devtools::install_github("strengejacke/strengejacke")
+
+# Set working directory
+setwd("~/Box/!ICD/ABCD/ANALYSES/!REVISION")
+
+# Load final models
+load('final_mods.Rdata')
+```
+
+### Final models 
+```{r}
+#make list w/ ones that include sig effects after FDR adjustment
+FINALwithmods <- (list(salWithFINAL, 
+                   danVanFINAL,
+                   conAmy_2hFINAL,conHipp_2hFINAL
+                   ))
+
+pred_labels = c('Intercept', 'Motion', 'Age', 'Female', 'Black', 'Hispanic', 'Other', 
+                'INR', 'Highest Ed', 'Material/Economic Deprivation', 'Psychosocial Threat', 'Caregiver Social Support',
+                'INR x Psychosocial Threat')
+
+dv_labels = c('SAL', 'DAN-VAN', 'CON-Amygdala', 'CON-Hippocampus')
+
+# Add dv_labels here if you want to change them, and uncomment the line below
+#dv_labels = c(...)
+
+FINALwithmodTable <- tab_model(FINALwithmods,
+          show.std=TRUE, # this approach is equal to standardizing the variables before fitting the model
+          show.est=FALSE,
+          show.re.var=FALSE,
+          emph.p=TRUE,# 
+          p.adjust = "BH",
+          p.style='stars',
+          show.aicc=TRUE, show.loglik = TRUE,
+          pred.labels=pred_labels,
+          dv.labels=dv_labels,
+          string.std='Estimate (Standardized)',
+          string.std_ci='95% CI' )
+
+#Open and then click window icon to see larger to screenshot for paper
+FINALwithmodTable
+```
+
